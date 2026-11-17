@@ -77,32 +77,13 @@ std::wstring normalize_address(std::wstring_view input) {
     return address.size() == 12 ? address : std::wstring{};
 }
 
-DeviceKind classify(std::wstring text) {
-    std::ranges::transform(text, text.begin(), [](wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
-    const auto has = [&text](std::wstring_view token) { return text.find(token) != std::wstring::npos; };
-    if (has(L"mouse") || has(L"мыш")) return DeviceKind::mouse;
-    if (has(L"audio") || has(L"headphone") || has(L"headset") || has(L"earbud") ||
-        has(L"airpods") || has(L"наушник")) return DeviceKind::audio;
-    if (has(L"keyboard") || has(L"клавиатур")) return DeviceKind::keyboard;
-    if (has(L"gaming") || has(L"gamepad") || has(L"controller") || has(L"геймпад")) return DeviceKind::controller;
-    return DeviceKind::other;
-}
-
 std::optional<unsigned> node_battery(const std::wstring& address) {
     if (address.empty()) return {};
     for (const auto prefix : {L"BTHENUM\\DEV_", L"BTHLE\\DEV_"}) {
         auto instance = prefix + address;
         DEVINST instanceHandle{};
         if (CM_Locate_DevNodeW(&instanceHandle, instance.data(), CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) continue;
-        for (const auto* key : {&pnpBattery, &shellBattery}) {
-            ULONG type = 0;
-            ULONG level = 0;
-            ULONG size = sizeof(level);
-            if (CM_Get_DevNode_PropertyW(instanceHandle, key, &type,
-                    reinterpret_cast<PBYTE>(&level), &size, 0) == CR_SUCCESS &&
-                (type == DEVPROP_TYPE_BYTE || type == DEVPROP_TYPE_UINT16 ||
-                 type == DEVPROP_TYPE_UINT32 || type == DEVPROP_TYPE_INT32) && level <= 100) return level;
-        }
+        if (auto level = windows_device_battery(instanceHandle)) return level;
     }
     return {};
 }
@@ -149,11 +130,11 @@ void enumerate(bool lowEnergy, std::vector<Endpoint>& endpoints) {
             com_array<hstring> categories;
             value.GetStringArray(categories);
             for (const auto& category : categories) {
-                endpoint.device.kind = classify(std::wstring(category));
+                endpoint.device.kind = classify_device_name(std::wstring(category));
                 if (endpoint.device.kind != DeviceKind::other) break;
             }
         }
-        if (endpoint.device.kind == DeviceKind::other) endpoint.device.kind = classify(endpoint.device.name);
+        if (endpoint.device.kind == DeviceKind::other) endpoint.device.kind = classify_device_name(endpoint.device.name);
         if (endpoint.device.connected) {
             if (lowEnergy) endpoint.gattId = endpoint.endpointId;
             endpoint.device.percent = battery_property(property(info, batteryKey));
@@ -164,6 +145,31 @@ void enumerate(bool lowEnergy, std::vector<Endpoint>& endpoints) {
     }
 }
 } // namespace
+
+std::optional<unsigned> windows_device_battery(unsigned long devnode) {
+    for (const auto* key : {&pnpBattery, &shellBattery}) {
+        DEVPROPTYPE type = 0;
+        ULONG level = 0;
+        ULONG size = sizeof(level);
+        if (CM_Get_DevNode_PropertyW(devnode, key, &type, reinterpret_cast<PBYTE>(&level), &size, 0) != CR_SUCCESS)
+            continue;
+        if (((type == DEVPROP_TYPE_BYTE && size == 1) || (type == DEVPROP_TYPE_UINT16 && size == 2) ||
+             ((type == DEVPROP_TYPE_UINT32 || type == DEVPROP_TYPE_INT32) && size == sizeof(level))) && level <= 100)
+            return level;
+    }
+    return {};
+}
+
+DeviceKind classify_device_name(std::wstring text) {
+    std::ranges::transform(text, text.begin(), [](wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+    const auto has = [&text](std::wstring_view token) { return text.find(token) != std::wstring::npos; };
+    if (has(L"mouse") || has(L"мыш")) return DeviceKind::mouse;
+    if (has(L"audio") || has(L"headphone") || has(L"headset") || has(L"earbud") ||
+        has(L"airpods") || has(L"наушник")) return DeviceKind::audio;
+    if (has(L"keyboard") || has(L"клавиатур")) return DeviceKind::keyboard;
+    if (has(L"gaming") || has(L"gamepad") || has(L"controller") || has(L"геймпад")) return DeviceKind::controller;
+    return DeviceKind::other;
+}
 
 std::wstring display_name(std::wstring name) {
     std::erase_if(name, [](wchar_t ch) {

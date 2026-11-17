@@ -178,7 +178,7 @@ public:
         if (!failed) {
             auto& incoming = work->result;
             for (auto& device : last.devices) {
-                if (device.transport == Transport::receiver ? incoming.receiverFailed : incoming.bluetoothFailed) {
+                if (device.transport == Transport::bluetooth ? incoming.bluetoothFailed : incoming.receiverFailed) {
                     device.percent.reset();
                     if (std::ranges::none_of(incoming.devices, [&](const Device& item) { return item.id == device.id; }))
                         incoming.devices.push_back(std::move(device));
@@ -260,7 +260,15 @@ private:
     }
 
     const wchar_t* device_name(const Device& device) const {
-        return device.name.empty() ? text(L"Устройство Bluetooth", L"Bluetooth device") : device.name.c_str();
+        if (!device.name.empty()) return device.name.c_str();
+        return device.transport == Transport::usb ? text(L"USB-устройство", L"USB device")
+                                                  : text(L"Устройство Bluetooth", L"Bluetooth device");
+    }
+
+    const wchar_t* transport_suffix(Transport transport) const {
+        if (transport == Transport::receiver) return text(L" · 2,4 ГГц", L" · 2.4 GHz");
+        if (transport == Transport::usb) return L" · USB";
+        return L"";
     }
 
     bool device_hidden(const std::wstring& key) {
@@ -276,7 +284,7 @@ private:
         std::map<std::wstring, std::wstring> names;
         for (const auto& device : last.devices) {
             std::wstring label = device_name(device);
-            if (device.transport == Transport::receiver) label += text(L" · 2,4 ГГц", L" · 2.4 GHz");
+            label += transport_suffix(device.transport);
             names.try_emplace(device.id, std::move(label));
         }
         std::vector<std::pair<std::wstring, std::wstring>> rows(names.begin(), names.end());
@@ -434,7 +442,7 @@ private:
             const auto level = !failed && device.connected ? device.percent : std::nullopt;
             std::wstring tooltip = demo ? text(L"Демо · ", L"Demo · ") : L"";
             tooltip += device_name(device);
-            if (device.transport == Transport::receiver) tooltip += text(L" · 2,4 ГГц", L" · 2.4 GHz");
+            tooltip += transport_suffix(device.transport);
             tooltip += L" · ";
             if (failed) tooltip += text(L"Чтение недоступно", L"Read failed");
             else if (!device.connected) tooltip += device.transport == Transport::receiver
@@ -551,8 +559,12 @@ int print_scan() {
         if (device.estimated && device.percent) report += L"~";
         report += device.percent ? std::to_wstring(*device.percent) + L"%" : L"--";
         report += device.connected ? L"\tconnected\t" : device.transport == Transport::receiver ? L"\tno response\t" : L"\tdisconnected\t";
-        report += device.transport == Transport::receiver ? L"2.4 GHz\t" : L"Bluetooth\t";
-        report += device.name.empty() ? L"Bluetooth device" : device.name;
+        switch (device.transport) {
+        case Transport::receiver: report += L"2.4 GHz\t"; break;
+        case Transport::usb: report += L"USB\t"; break;
+        case Transport::bluetooth: report += L"Bluetooth\t"; break;
+        }
+        report += device.name.empty() ? (device.transport == Transport::usb ? L"USB device" : L"Bluetooth device") : device.name;
         report += L"\r\n";
     }
     DWORD written = 0;
