@@ -1,7 +1,7 @@
 ﻿[Setup]
 AppId=CheckYourBattery
 AppName=Check Your Battery
-AppVersion=1.0.0
+AppVersion=1.1.0
 AppPublisher=xm1ll
 AppPublisherURL=https://github.com/xm1ll/checkyourbattery
 DefaultDirName={localappdata}\Programs\CheckYourBattery
