@@ -5,3 +5,5 @@
 #define IDC_EMPTY 204
 #define IDC_DONE 205
 #define IDC_QUIT 206
+#define IDC_LANGUAGE_LABEL 207
+#define IDC_LANGUAGE 208

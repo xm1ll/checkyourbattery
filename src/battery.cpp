@@ -49,7 +49,7 @@ std::wstring display_name(std::wstring name) {
         if (IS_HIGH_SURROGATE(name.back())) name.pop_back();
         name += L"…";
     }
-    return name.empty() ? L"Устройство Bluetooth" : name;
+    return name;
 }
 
 template <typename Operation>
@@ -218,7 +218,7 @@ static ScanResult scan_bluetooth() {
         auto& merged = *match;
         if (!merged.device.percent) merged.device.percent = endpoint.device.percent;
         if (merged.device.kind == DeviceKind::other) merged.device.kind = endpoint.device.kind;
-        if (merged.device.name == L"Устройство Bluetooth") merged.device.name = endpoint.device.name;
+        if (merged.device.name.empty()) merged.device.name = std::move(endpoint.device.name);
         if (merged.address.empty()) merged.address = std::move(endpoint.address);
         if (merged.container == winrt::guid{}) merged.container = endpoint.container;
         if (!endpoint.gattId.empty()) merged.gattId = std::move(endpoint.gattId);
@@ -254,11 +254,11 @@ ScanResult scan_devices() {
     return result;
 }
 
-ScanResult demo_devices() {
+ScanResult demo_devices(bool english) {
     return {{
-        {L"Беспроводная мышь", DeviceKind::mouse, true, 82, L"demo/mouse"},
-        {L"Bluetooth-наушники", DeviceKind::audio, true, 18, L"demo/headphones"},
-        {L"Беспроводная клавиатура", DeviceKind::keyboard, true, {}, L"demo/keyboard"},
-        {L"Игровой контроллер", DeviceKind::controller, false, {}, L"demo/controller"}
+        {english ? L"Wireless mouse" : L"Беспроводная мышь", DeviceKind::mouse, true, 82, L"demo/mouse"},
+        {english ? L"Bluetooth headphones" : L"Bluetooth-наушники", DeviceKind::audio, true, 18, L"demo/headphones"},
+        {english ? L"Wireless keyboard" : L"Беспроводная клавиатура", DeviceKind::keyboard, true, {}, L"demo/keyboard"},
+        {english ? L"Game controller" : L"Игровой контроллер", DeviceKind::controller, false, {}, L"demo/controller"}
     }};
 }

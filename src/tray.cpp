@@ -18,11 +18,13 @@
 
 namespace {
 constexpr UINT trayMessage = WM_APP + 1;
+constexpr UINT openSettingsMessage = WM_APP + 2;
 constexpr UINT_PTR scanTimer = 1;
 constexpr UINT scanInterval = 60000;
 constexpr wchar_t applicationName[] = L"Check Your Battery";
 constexpr wchar_t preferencesKey[] = L"Software\\CheckYourBattery";
 constexpr wchar_t percentPreference[] = L"ShowBatteryPercent";
+constexpr wchar_t languagePreference[] = L"UseEnglish";
 
 struct ScanWork {
     HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -137,8 +139,9 @@ public:
 
     void initialize() {
         showPercent = !demo && read_preference(percentPreference, true);
+        english = !demo && read_preference(languagePreference);
         if (demo) {
-            last = demo_devices();
+            last = demo_devices(english);
             render();
         } else {
             start_scan();
@@ -226,8 +229,8 @@ public:
     void open_tray_menu() {
         const HMENU menu = CreatePopupMenu();
         if (!menu) return;
-        AppendMenuW(menu, MF_STRING, 1, L"Настройки");
-        AppendMenuW(menu, MF_STRING, 2, L"Выйти");
+        AppendMenuW(menu, MF_STRING, 1, text(L"Настройки", L"Settings"));
+        AppendMenuW(menu, MF_STRING, 2, text(L"Выйти", L"Quit"));
         POINT anchor{};
         GetCursorPos(&anchor);
         TPMPARAMS placement{};
@@ -252,6 +255,14 @@ public:
     }
 
 private:
+    const wchar_t* text(const wchar_t* russian, const wchar_t* englishText) const {
+        return english ? englishText : russian;
+    }
+
+    const wchar_t* device_name(const Device& device) const {
+        return device.name.empty() ? text(L"Устройство Bluetooth", L"Bluetooth device") : device.name.c_str();
+    }
+
     bool device_hidden(const std::wstring& key) {
         const auto [it, inserted] = hidden.try_emplace(key, false);
         if (inserted && !demo) {
@@ -264,16 +275,17 @@ private:
     void refresh_device_list() {
         std::map<std::wstring, std::wstring> names;
         for (const auto& device : last.devices) {
-            auto label = device.name;
-            if (device.transport == Transport::receiver) label += L" · 2,4 ГГц";
+            std::wstring label = device_name(device);
+            if (device.transport == Transport::receiver) label += text(L" · 2,4 ГГц", L" · 2.4 GHz");
             names.try_emplace(device.id, std::move(label));
         }
         std::vector<std::pair<std::wstring, std::wstring>> rows(names.begin(), names.end());
         std::ranges::sort(rows, {}, &std::pair<std::wstring, std::wstring>::second);
         const auto list = GetDlgItem(settings, IDC_DEVICES);
         ShowWindow(GetDlgItem(settings, IDC_EMPTY), rows.empty() ? SW_SHOW : SW_HIDE);
-        SetDlgItemTextW(settings, IDC_EMPTY, failed ? L"Не удалось прочитать список устройств."
-                                                   : work ? L"Поиск устройств…" : L"Нет Bluetooth-устройств или поддерживаемых приёмников.");
+        SetDlgItemTextW(settings, IDC_EMPTY, failed ? text(L"Не удалось прочитать список устройств.", L"Could not read the device list.")
+            : work ? text(L"Поиск устройств…", L"Looking for devices…")
+                   : text(L"Нет Bluetooth-устройств или поддерживаемых приёмников.", L"No Bluetooth devices or supported receivers found."));
         if (rows == settingsRows) {
             ShowWindow(list, rows.empty() ? SW_HIDE : SW_SHOW);
             return;
@@ -299,13 +311,22 @@ private:
         updatingSettings = false;
     }
 
+    void localize_settings() {
+        SetWindowTextW(settings, demo ? text(L"Настройки заряда — демо", L"Battery settings (demo)")
+                                      : text(L"Настройки заряда", L"Battery settings"));
+        SetDlgItemTextW(settings, IDC_DEVICE_LABEL, text(L"Устройства в области уведомлений", L"Devices in the system tray"));
+        SetDlgItemTextW(settings, IDC_LANGUAGE_LABEL, text(L"Язык", L"Language"));
+        SetDlgItemTextW(settings, IDC_PERCENT, text(L"Зарядка в процентах", L"Battery percentage"));
+        SetDlgItemTextW(settings, IDC_DONE, text(L"Готово", L"Done"));
+        SetDlgItemTextW(settings, IDC_QUIT, text(L"Выйти", L"Quit"));
+        refresh_device_list();
+    }
+
     void initialize_settings(HWND dialog) {
         settings = dialog;
-        SetWindowTextW(dialog, demo ? L"Настройки заряда — демо" : L"Настройки заряда");
-        SetDlgItemTextW(dialog, IDC_DEVICE_LABEL, L"Устройства в области уведомлений");
-        SetDlgItemTextW(dialog, IDC_PERCENT, L"Зарядка в процентах");
-        SetDlgItemTextW(dialog, IDC_DONE, L"Готово");
-        SetDlgItemTextW(dialog, IDC_QUIT, L"Выйти");
+        SendDlgItemMessageW(dialog, IDC_LANGUAGE, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Русский"));
+        SendDlgItemMessageW(dialog, IDC_LANGUAGE, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"English"));
+        SendDlgItemMessageW(dialog, IDC_LANGUAGE, CB_SETCURSEL, english ? 1 : 0, 0);
         CheckDlgButton(dialog, IDC_PERCENT, showPercent ? BST_CHECKED : BST_UNCHECKED);
         const auto list = GetDlgItem(dialog, IDC_DEVICES);
         ListView_SetExtendedListViewStyle(list, LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT);
@@ -315,7 +336,23 @@ private:
         column.mask = LVCF_WIDTH;
         column.cx = bounds.right - GetSystemMetricsForDpi(SM_CXVSCROLL, GetDpiForWindow(dialog));
         ListView_InsertColumn(list, 0, &column);
-        refresh_device_list();
+        localize_settings();
+    }
+
+    void change_language() {
+        const auto selection = SendDlgItemMessageW(settings, IDC_LANGUAGE, CB_GETCURSEL, 0, 0);
+        if (selection != 0 && selection != 1) return;
+        const bool useEnglish = selection == 1;
+        if (useEnglish == english) return;
+        if (!demo && !write_preference(languagePreference, useEnglish)) {
+            SendDlgItemMessageW(settings, IDC_LANGUAGE, CB_SETCURSEL, english ? 1 : 0, 0);
+            settings_error();
+            return;
+        }
+        english = useEnglish;
+        if (demo) last = demo_devices(english);
+        localize_settings();
+        render();
     }
 
     void change_percent() {
@@ -351,7 +388,8 @@ private:
     }
 
     void settings_error() const {
-        MessageBoxW(settings, L"Не удалось сохранить настройки.", applicationName, MB_OK | MB_ICONWARNING);
+        MessageBoxW(settings, text(L"Не удалось сохранить настройки.", L"Could not save settings."),
+                    applicationName, MB_OK | MB_ICONWARNING);
     }
 
     static INT_PTR CALLBACK settings_proc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -366,6 +404,7 @@ private:
         switch (message) {
         case WM_COMMAND:
             if (LOWORD(wParam) == IDC_PERCENT && HIWORD(wParam) == BN_CLICKED) app->change_percent();
+            else if (LOWORD(wParam) == IDC_LANGUAGE && HIWORD(wParam) == CBN_SELCHANGE) app->change_language();
             else if (LOWORD(wParam) == IDC_DONE && HIWORD(wParam) == BN_CLICKED) DestroyWindow(dialog);
             else if (LOWORD(wParam) == IDC_QUIT && HIWORD(wParam) == BN_CLICKED)
                 PostMessageW(app->window, WM_CLOSE, 0, 0);
@@ -393,24 +432,27 @@ private:
         for (const auto& device : last.devices) {
             if (device_hidden(device.id)) continue;
             const auto level = !failed && device.connected ? device.percent : std::nullopt;
-            std::wstring tooltip = demo ? L"Демо · " : L"";
-            tooltip += device.name;
-            tooltip += device.transport == Transport::receiver ? L" · 2,4 ГГц · " : L" · ";
-            if (failed) tooltip += L"Чтение недоступно";
-            else if (!device.connected) tooltip += device.transport == Transport::receiver ? L"Нет ответа от устройства" : L"Не подключено";
+            std::wstring tooltip = demo ? text(L"Демо · ", L"Demo · ") : L"";
+            tooltip += device_name(device);
+            if (device.transport == Transport::receiver) tooltip += text(L" · 2,4 ГГц", L" · 2.4 GHz");
+            tooltip += L" · ";
+            if (failed) tooltip += text(L"Чтение недоступно", L"Read failed");
+            else if (!device.connected) tooltip += device.transport == Transport::receiver
+                ? text(L"Нет ответа от устройства", L"No response from device") : text(L"Не подключено", L"Disconnected");
             else if (level) {
                 if (device.estimated) tooltip += L"≈";
                 tooltip += std::to_wstring(*level) + L"%";
             }
-            else tooltip += L"Нет данных о заряде";
+            else tooltip += text(L"Нет данных о заряде", L"Battery level unavailable");
             desired.try_emplace(device.id, IconSpec{device.kind, level, std::move(tooltip), showPercent && level.has_value()});
         }
         if (desired.empty()) {
-            const auto tip = !last.devices.empty() ? L"Заряд устройств · Все устройства скрыты"
-                           : failed ? L"Заряд устройств · Ошибка чтения"
-                           : work ? L"Заряд устройств · Поиск устройств"
-                                  : L"Заряд устройств · Нет поддерживаемых устройств";
-            desired.emplace(L"status", IconSpec{DeviceKind::other, {}, tip});
+            std::wstring tip = text(L"Заряд устройств · ", L"Device batteries · ");
+            tip += !last.devices.empty() ? text(L"Все устройства скрыты", L"All devices hidden")
+                 : failed ? text(L"Ошибка чтения", L"Read failed")
+                 : work ? text(L"Поиск устройств", L"Looking for devices")
+                        : text(L"Нет поддерживаемых устройств", L"No supported devices");
+            desired.emplace(L"status", IconSpec{DeviceKind::other, {}, std::move(tip)});
         }
 
         for (auto it = icons.begin(); it != icons.end();) {
@@ -430,6 +472,7 @@ private:
     }
 
     const bool demo;
+    bool english = false;
     bool showPercent = false;
     bool updatingSettings = false;
     bool failed = false;
@@ -458,6 +501,9 @@ LRESULT CALLBACK tray_proc(HWND window, UINT message, WPARAM wParam, LPARAM lPar
     switch (message) {
     case WM_TIMER:
         if (wParam == scanTimer) app->start_scan();
+        return 0;
+    case openSettingsMessage:
+        app->open_settings();
         return 0;
     case trayMessage:
         if (LOWORD(lParam) == WM_CONTEXTMENU || lParam == WM_RBUTTONUP) app->open_tray_menu();
@@ -506,7 +552,8 @@ int print_scan() {
         report += device.percent ? std::to_wstring(*device.percent) + L"%" : L"--";
         report += device.connected ? L"\tconnected\t" : device.transport == Transport::receiver ? L"\tno response\t" : L"\tdisconnected\t";
         report += device.transport == Transport::receiver ? L"2.4 GHz\t" : L"Bluetooth\t";
-        report += device.name + L"\r\n";
+        report += device.name.empty() ? L"Bluetooth device" : device.name;
+        report += L"\r\n";
     }
     DWORD written = 0;
     DWORD mode = 0;
@@ -530,6 +577,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     const std::wstring_view option = argv && argc > 1 ? argv[1] : L"";
     const bool demo = option == L"--demo";
     const bool diagnostic = option == L"--scan";
+    const bool configure = option == L"--configure";
     LocalFree(argv);
     if (diagnostic) return print_scan();
 
@@ -538,7 +586,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     const HANDLE mutex = CreateMutexW(nullptr, FALSE, mutexName.c_str());
     if (!mutex) return 1;
     const bool duplicate = GetLastError() == ERROR_ALREADY_EXISTS;
-    if (duplicate) { CloseHandle(mutex); return 0; }
+    if (duplicate) {
+        if (configure) {
+            if (const HWND active = FindWindowW(windowClass, applicationName)) {
+                DWORD process = 0;
+                GetWindowThreadProcessId(active, &process);
+                if (process) AllowSetForegroundWindow(process);
+                PostMessageW(active, openSettingsMessage, 0, 0);
+            }
+        }
+        CloseHandle(mutex);
+        return 0;
+    }
 
     App app(demo);
     WNDCLASSW cls{};
@@ -550,6 +609,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     int result = 1;
     if (window) {
         app.initialize();
+        if (configure) app.open_settings();
         result = run(app);
         if (IsWindow(window)) DestroyWindow(window);
     }
