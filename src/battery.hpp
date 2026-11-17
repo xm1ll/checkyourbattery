@@ -27,3 +27,4 @@ struct ScanResult {
 ScanResult scan_devices();
 ScanResult scan_usb_receivers();
 ScanResult demo_devices(bool english);
+std::wstring display_name(std::wstring name);

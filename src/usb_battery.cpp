@@ -1,25 +1,60 @@
-#include "battery.hpp"
+#include "hid_io.hpp"
 
-#include <windows.h>
-#include <hidsdi.h>
+#include <objbase.h>
 #include <setupapi.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <memory>
+#include <map>
 #include <span>
 #include <string_view>
 
+namespace hid {
+Handle open_hid(const wchar_t* path, DWORD access) {
+    const HANDLE handle = CreateFileW(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                                      FILE_FLAG_OVERLAPPED, nullptr);
+    return Handle(handle == INVALID_HANDLE_VALUE ? nullptr : handle);
+}
+
+bool hid_caps(HANDLE handle, USHORT vendor, USHORT product, HIDP_CAPS& caps) {
+    HIDD_ATTRIBUTES attributes{};
+    attributes.Size = sizeof(attributes);
+    if (!HidD_GetAttributes(handle, &attributes) || attributes.VendorID != vendor ||
+        attributes.ProductID != product) return false;
+    PHIDP_PREPARSED_DATA data = nullptr;
+    if (!HidD_GetPreparsedData(handle, &data)) return false;
+    const auto status = HidP_GetCaps(data, &caps);
+    HidD_FreePreparsedData(data);
+    return status == HIDP_STATUS_SUCCESS;
+}
+
+DWORD transfer(HANDLE handle, std::span<BYTE> report, bool write, DWORD waitMs) {
+    const Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (!event) return 0;
+    OVERLAPPED operation{};
+    operation.hEvent = event.get();
+    DWORD size = 0;
+    const auto started = write ? WriteFile(handle, report.data(), static_cast<DWORD>(report.size()), &size, &operation)
+                               : ReadFile(handle, report.data(), static_cast<DWORD>(report.size()), &size, &operation);
+    if (started) return size;
+    if (GetLastError() != ERROR_IO_PENDING) return 0;
+    if (WaitForSingleObject(event.get(), waitMs) != WAIT_OBJECT_0) {
+        CancelIoEx(handle, &operation);
+        GetOverlappedResult(handle, &operation, &size, TRUE);
+        return 0;
+    }
+    return GetOverlappedResult(handle, &operation, &size, FALSE) ? size : 0;
+}
+} // namespace hid
+
 namespace {
-struct HandleCloser {
-    void operator()(HANDLE handle) const { CloseHandle(handle); }
-};
-using Handle = std::unique_ptr<void, HandleCloser>;
+using namespace hid;
 using Report = std::array<BYTE, 64>;
 
-enum class Protocol { maya, barracuda, arctisNova7, arctisNova7Steps, arctisNova5, arctis7Plus,
-                      arctisGameBuds, aerox, hyperxCloud, nzxt };
+enum class Protocol { maya, sinowealth, barracuda, blackshark2020, arctisNova7, arctisNova7Steps, arctisNova5,
+                      arctis7Plus, arctisGameBuds, aerox, hyperxCloud, hyperxCloud2, nzxt, corsairVoid,
+                      corsairHs80, corsairVirtuoso, urxCore75 };
 
 struct Receiver {
     USHORT vendor;
@@ -106,70 +141,80 @@ constexpr Receiver receivers[]{
      DeviceKind::audio, L"HyperX Cloud II Core Wireless"},
     {0x1e71, 0x2101, L"hid#vid_1e71&pid_2101&", 0xffca, 1, Protocol::nzxt,
      DeviceKind::mouse, L"NZXT Lift Elite Wireless"},
+    {0x36a7, 0xa880, L"hid#vid_36a7&pid_a880", 0xffff, 0, Protocol::sinowealth,
+     DeviceKind::mouse, L"WLmouse Beast X Max"},
+    {0x36a7, 0xa868, L"hid#vid_36a7&pid_a868", 0xffff, 0, Protocol::sinowealth,
+     DeviceKind::mouse, L"WLmouse Beast X Mini Pro"},
+    {0x1532, 0x0528, L"hid#vid_1532&pid_0528", 0xff00, 1, Protocol::blackshark2020,
+     DeviceKind::audio, L"Razer BlackShark V2 Pro (2020)"},
+    {0x03f0, 0x0696, L"hid#vid_03f0&pid_0696", 0xff90, 0x0303, Protocol::hyperxCloud2,
+     DeviceKind::audio, L"HyperX Cloud II Wireless"},
+    {0x03f0, 0x018b, L"hid#vid_03f0&pid_018b", 0xff90, 0x0303, Protocol::hyperxCloud2,
+     DeviceKind::audio, L"HyperX Cloud II Wireless"},
+    {0x1b1c, 0x0a55, L"hid#vid_1b1c&pid_0a55&mi_03", 0xffc5, 1, Protocol::corsairVoid,
+     DeviceKind::audio, L"Corsair Void Elite Wireless"},
+    {0x1b1c, 0x0a6b, L"hid#vid_1b1c&pid_0a6b&mi_03", 0xff42, 1, Protocol::corsairHs80,
+     DeviceKind::audio, L"Corsair HS80 RGB Wireless"},
+    {0x1b1c, 0x0a3e, L"hid#vid_1b1c&pid_0a3e", 0xff42, 1, Protocol::corsairVirtuoso,
+     DeviceKind::audio, L"Corsair Virtuoso RGB Wireless SE"},
+    {0x1b1c, 0x0a40, L"hid#vid_1b1c&pid_0a40", 0xff42, 1, Protocol::corsairVirtuoso,
+     DeviceKind::audio, L"Corsair Virtuoso RGB Wireless (Slipstream)"},
+    {0x1b1c, 0x0a64, L"hid#vid_1b1c&pid_0a64", 0xff42, 1, Protocol::corsairVirtuoso,
+     DeviceKind::audio, L"Corsair Virtuoso RGB Wireless XT"},
+    {0x36b0, 0x3002, L"hid#vid_36b0&pid_3002&mi_01", 0xff60, 0x61, Protocol::urxCore75,
+     DeviceKind::keyboard, L"URX Core75"},
 };
 
-Handle open_hid(const wchar_t* path, DWORD access) {
-    const HANDLE handle = CreateFileW(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-                                      FILE_FLAG_OVERLAPPED, nullptr);
-    return Handle(handle == INVALID_HANDLE_VALUE ? nullptr : handle);
-}
-
 bool matches(HANDLE handle, const Receiver& receiver, HIDP_CAPS& caps) {
-    HIDD_ATTRIBUTES attributes{};
-    attributes.Size = sizeof(attributes);
-    if (!HidD_GetAttributes(handle, &attributes) || attributes.VendorID != receiver.vendor ||
-        attributes.ProductID != receiver.product) return false;
-    PHIDP_PREPARSED_DATA data = nullptr;
-    if (!HidD_GetPreparsedData(handle, &data)) return false;
-    const auto status = HidP_GetCaps(data, &caps);
-    HidD_FreePreparsedData(data);
-    return status == HIDP_STATUS_SUCCESS && caps.UsagePage == receiver.usagePage && caps.Usage == receiver.usage;
+    return hid_caps(handle, receiver.vendor, receiver.product, caps) &&
+           caps.UsagePage == receiver.usagePage && caps.Usage == receiver.usage;
 }
 
 bool supports_reports(const HIDP_CAPS& caps, Protocol protocol) {
-    if (protocol == Protocol::maya) return caps.FeatureReportByteLength == 65;
+    if (protocol == Protocol::maya || protocol == Protocol::sinowealth) return caps.FeatureReportByteLength == 65;
+    if (protocol == Protocol::blackshark2020) return caps.FeatureReportByteLength == 64;
     if (protocol == Protocol::barracuda) return caps.OutputReportByteLength == 64 && caps.InputReportByteLength == 64;
     if (protocol == Protocol::hyperxCloud) {
         return (caps.OutputReportByteLength == 62 || caps.FeatureReportByteLength == 62) &&
                caps.InputReportByteLength >= 62 && caps.InputReportByteLength <= 65;
     }
     if (protocol == Protocol::nzxt) return caps.OutputReportByteLength == 64 && caps.InputReportByteLength == 64;
+    if (protocol == Protocol::hyperxCloud2) return caps.OutputReportByteLength == 52 && caps.InputReportByteLength == 20;
+    if (protocol == Protocol::corsairHs80 || protocol == Protocol::corsairVirtuoso)
+        return caps.OutputReportByteLength == 64 && caps.InputReportByteLength == 64;
+    if (protocol == Protocol::corsairVoid) {
+        return caps.OutputReportByteLength >= 2 && caps.OutputReportByteLength <= 65 &&
+               caps.InputReportByteLength >= 5 && caps.InputReportByteLength <= 65;
+    }
+    if (protocol == Protocol::urxCore75) {
+        return (caps.OutputReportByteLength == 32 || caps.OutputReportByteLength == 33) &&
+               (caps.InputReportByteLength == 32 || caps.InputReportByteLength == 33);
+    }
     // Windows may include a synthetic zero report ID in the collection's lengths.
     return (caps.OutputReportByteLength == 64 || caps.OutputReportByteLength == 65) &&
            (caps.InputReportByteLength == 64 || caps.InputReportByteLength == 65);
 }
 
-std::optional<unsigned> maya_battery(HANDLE handle) {
-    // Feature report 0, followed by the Maya X battery query. The leading zero is the Win32 report ID.
-    std::array<BYTE, 65> request{0, 0, 0, 2, 2, 0, 0x83};
-    if (!HidD_SetFeature(handle, request.data(), static_cast<ULONG>(request.size()))) return {};
-    constexpr std::array<BYTE, 6> header{0xa1, 0, 2, 2, 0, 0x83};
-    for (int attempt = 0; attempt < 6; ++attempt) {
-        Sleep(50);
-        std::array<BYTE, 65> reply{};
-        if (!HidD_GetFeature(handle, reply.data(), static_cast<ULONG>(reply.size()))) continue;
-        const auto payload = std::span(reply).subspan(reply[0] == 0 ? 1 : 0);
-        if (std::ranges::equal(header, payload.first(header.size())) && payload[7] <= 100) return payload[7];
-    }
+std::optional<unsigned> sinowealth_reply(std::span<const BYTE> report, bool acceptsWaking) {
+    if (!report.empty() && report.front() == 0) report = report.subspan(1);
+    constexpr std::array<BYTE, 5> command{0, 2, 2, 0, 0x83};
+    if (report.size() >= 8 && (report[0] == 0xa1 || (acceptsWaking && report[0] == 0xa2)) &&
+        std::ranges::equal(command, report.subspan(1, command.size())) && report[7] <= 100) return report[7];
     return {};
 }
 
-DWORD transfer(HANDLE handle, std::span<BYTE> report, bool write, DWORD waitMs) {
-    const Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
-    if (!event) return 0;
-    OVERLAPPED operation{};
-    operation.hEvent = event.get();
-    DWORD size = 0;
-    const auto started = write ? WriteFile(handle, report.data(), static_cast<DWORD>(report.size()), &size, &operation)
-                               : ReadFile(handle, report.data(), static_cast<DWORD>(report.size()), &size, &operation);
-    if (started) return size;
-    if (GetLastError() != ERROR_IO_PENDING) return 0;
-    if (WaitForSingleObject(event.get(), waitMs) != WAIT_OBJECT_0) {
-        CancelIoEx(handle, &operation);
-        GetOverlappedResult(handle, &operation, &size, TRUE);
-        return 0;
+std::optional<unsigned> sinowealth_battery(HANDLE handle, bool acceptsWaking) {
+    // Feature report 0, followed by the Maya X battery query. The leading zero is the Win32 report ID.
+    std::array<BYTE, 65> request{0, 0, 0, 2, 2, 0, 0x83};
+    if (!HidD_SetFeature(handle, request.data(), static_cast<ULONG>(request.size()))) return {};
+    const int attempts = acceptsWaking ? 12 : 6;
+    for (int attempt = 0; attempt < attempts; ++attempt) {
+        Sleep(50);
+        std::array<BYTE, 65> reply{};
+        if (!HidD_GetFeature(handle, reply.data(), static_cast<ULONG>(reply.size()))) continue;
+        if (const auto level = sinowealth_reply(reply, acceptsWaking)) return level;
     }
-    return GetOverlappedResult(handle, &operation, &size, FALSE) ? size : 0;
+    return {};
 }
 
 template<typename Parse>
@@ -268,6 +313,89 @@ std::optional<unsigned> nzxt_battery(HANDLE handle) {
     return exchange(handle, request, reply, nzxt_reply);
 }
 
+std::optional<unsigned> cloud2_reply(std::span<const BYTE> report) {
+    constexpr std::array<BYTE, 4> header{0x06, 0xff, 0xbb, 0x02};
+    if (report.size() == 20 && std::ranges::equal(header, report.first(header.size())) && report[7] <= 100) {
+        return report[7];
+    }
+    return {};
+}
+
+std::optional<unsigned> cloud2_battery(HANDLE handle) {
+    std::array<BYTE, 52> request{0x06, 0xff, 0xbb, 0x02};
+    std::array<BYTE, 20> reply{};
+    return exchange(handle, request, reply, cloud2_reply);
+}
+
+std::optional<unsigned> blackshark_reply(std::span<const BYTE> report) {
+    constexpr std::array<BYTE, 9> header{0xff, 0x0f, 0x05, 0xfe, 0x12, 0x04, 0x1f, 0x08, 0x05};
+    if (report.size() != 64 || !std::ranges::equal(header, report.first(header.size()))) return {};
+    const unsigned voltage = (report[12] << 8) | report[13];
+    if (voltage < 2500 || voltage > 4500 || report[11] == 9 || report[14] > 100) return {};
+    return report[14];
+}
+
+std::optional<unsigned> blackshark_battery(HANDLE handle) {
+    Report request{0xff, 0x0a, 0, 0xfd, 0x04, 0x12, 0xf1, 0x02, 0x05};
+    if (!HidD_SetFeature(handle, request.data(), static_cast<ULONG>(request.size()))) return {};
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        Sleep(100);
+        Report reply{0xff};
+        if (HidD_GetFeature(handle, reply.data(), static_cast<ULONG>(reply.size()))) {
+            if (const auto level = blackshark_reply(reply)) return level;
+        }
+    }
+    return {};
+}
+
+std::optional<unsigned> corsair_void_reply(std::span<const BYTE> report) {
+    if (report.size() < 5 || report[0] != 0x64 || report[1] != 0 || report[3] != 0xb1) return {};
+    if (report[4] != 1 && report[4] != 2 && report[4] != 4 && report[4] != 5) return {};
+    const unsigned level = report[2] & 0x7f;
+    if (level <= 100) return level;
+    return {};
+}
+
+std::optional<unsigned> corsair_void_battery(HANDLE handle, const HIDP_CAPS& caps) {
+    std::array<BYTE, 65> request{0xc9, 0x64};
+    std::array<BYTE, 65> reply{};
+    return exchange(handle, std::span(request).first(caps.OutputReportByteLength),
+                    std::span(reply).first(caps.InputReportByteLength), corsair_void_reply);
+}
+
+std::optional<unsigned> corsair_routed_reply(std::span<const BYTE> report) {
+    constexpr std::array<BYTE, 4> header{1, 1, 2, 0};
+    if (report.size() < 8 || !std::ranges::equal(header, report.first(header.size()))) return {};
+    const auto tenths = report[4] | (report[5] << 8);
+    if (tenths > 1000 || report[6] != 0 || report[7] != 0) return {};
+    return static_cast<unsigned>((tenths + 5) / 10);
+}
+
+std::optional<unsigned> corsair_routed_battery(HANDLE handle, bool virtuoso) {
+    Report request{2, 9, 2, 0x0f};
+    Report reply{};
+    const auto first = exchange(handle, request, reply, corsair_routed_reply);
+    // Slipstream answers echo Get Property, not the property ID. Require two matching reads.
+    if (!virtuoso || !first) return first;
+    const auto second = exchange(handle, request, reply, corsair_routed_reply);
+    return first == second ? first : std::nullopt;
+}
+
+std::optional<unsigned> urx_reply(std::span<const BYTE> report) {
+    if (!report.empty() && report.front() == 0) report = report.subspan(1);
+    if (report.size() >= 4 && report[0] == 8 && report[1] == 0 && report[2] == 7 && report[3] <= 100) {
+        return report[3];
+    }
+    return {};
+}
+
+std::optional<unsigned> urx_battery(HANDLE handle, const HIDP_CAPS& caps) {
+    std::array<BYTE, 33> request{0, 8, 0, 7};
+    std::array<BYTE, 33> reply{};
+    return exchange(handle, std::span(request).first(caps.OutputReportByteLength),
+                    std::span(reply).first(caps.InputReportByteLength), urx_reply);
+}
+
 struct RaceReply {
     BYTE status;
     std::optional<unsigned> millivolts;
@@ -318,51 +446,72 @@ std::optional<unsigned> barracuda_battery(HANDLE handle) {
     return whole + (voltage - *(upper - 1)) * 10 / (*upper - *(upper - 1));
 }
 
-std::optional<Device> read_receiver(const std::wstring& path) {
-    auto key = path;
-    std::ranges::transform(key, key.begin(), [](wchar_t ch) { return ch >= L'A' && ch <= L'Z' ? ch + 32 : ch; });
-    if (!key.starts_with(L"\\\\?\\")) return {};
+const Receiver* receiver_for_path(const std::wstring& key) {
+    if (!key.starts_with(L"\\\\?\\")) return nullptr;
     const auto interfacePath = std::wstring_view(key).substr(4);
     const auto receiver = std::ranges::find_if(receivers, [interfacePath](const Receiver& candidate) {
         if (!interfacePath.starts_with(candidate.interfacePath)) return false;
         if (candidate.interfacePath.ends_with(L'#') || candidate.interfacePath.ends_with(L'&')) return true;
         const auto suffix = interfacePath.substr(candidate.interfacePath.size());
-        return suffix.starts_with(L'#') || suffix.starts_with(L"&col");
+        return suffix.starts_with(L'#') || suffix.starts_with(L"&col") ||
+               (suffix.starts_with(L"&mi_") && candidate.interfacePath.find(L"&mi_") == std::wstring_view::npos);
     });
-    if (receiver == std::end(receivers)) return {};
+    return receiver != std::end(receivers) ? receiver : nullptr;
+}
 
+std::wstring container_key(HDEVINFO set, SP_DEVINFO_DATA& device) {
+    constexpr DEVPROPKEY containerId{{0x8c7ed206, 0x3f8a, 0x4827, {0xb3, 0xab, 0xae, 0x9e, 0x1f, 0xae, 0xfc, 0x6c}}, 2};
+    GUID container{};
+    DEVPROPTYPE type = 0;
+    if (!SetupDiGetDevicePropertyW(set, &device, &containerId, &type, reinterpret_cast<PBYTE>(&container),
+                                    sizeof(container), nullptr, 0) || type != DEVPROP_TYPE_GUID ||
+        IsEqualGUID(container, GUID{})) return {};
+    wchar_t id[39]{};
+    return StringFromGUID2(container, id, ARRAYSIZE(id)) ? id : L"";
+}
+
+std::optional<Device> read_receiver(const std::wstring& path, std::wstring key, const Receiver& receiver) {
     const Handle identity = open_hid(path.c_str(), 0);
     HIDP_CAPS caps{};
-    if (!identity || !matches(identity.get(), *receiver, caps) || !supports_reports(caps, receiver->protocol)) return {};
+    if (!identity || !matches(identity.get(), receiver, caps) || !supports_reports(caps, receiver.protocol)) return {};
 
     const auto channel = open_hid(path.c_str(), GENERIC_READ | GENERIC_WRITE);
     HIDP_CAPS channelCaps{};
     std::optional<unsigned> percent;
-    if (channel && matches(channel.get(), *receiver, channelCaps) && supports_reports(channelCaps, receiver->protocol)) {
-        switch (receiver->protocol) {
-        case Protocol::maya: percent = maya_battery(channel.get()); break;
+    if (channel && matches(channel.get(), receiver, channelCaps) && supports_reports(channelCaps, receiver.protocol)) {
+        switch (receiver.protocol) {
+        case Protocol::maya:
+        case Protocol::sinowealth: percent = sinowealth_battery(channel.get(), receiver.protocol == Protocol::sinowealth); break;
         case Protocol::barracuda: percent = barracuda_battery(channel.get()); break;
+        case Protocol::blackshark2020: percent = blackshark_battery(channel.get()); break;
         case Protocol::hyperxCloud: percent = hyperx_battery(channel.get(), channelCaps); break;
+        case Protocol::hyperxCloud2: percent = cloud2_battery(channel.get()); break;
         case Protocol::nzxt: percent = nzxt_battery(channel.get()); break;
-        default: percent = steelseries_battery(channel.get(), channelCaps, receiver->protocol); break;
+        case Protocol::corsairVoid: percent = corsair_void_battery(channel.get(), channelCaps); break;
+        case Protocol::corsairHs80:
+        case Protocol::corsairVirtuoso: percent = corsair_routed_battery(channel.get(), receiver.protocol == Protocol::corsairVirtuoso); break;
+        case Protocol::urxCore75: percent = urx_battery(channel.get(), channelCaps); break;
+        default: percent = steelseries_battery(channel.get(), channelCaps, receiver.protocol); break;
         }
     }
-    return Device{receiver->name, receiver->kind, percent.has_value(), percent, L"usb/" + key,
-                  Transport::receiver, receiver->protocol == Protocol::barracuda};
+    return Device{receiver.name, receiver.kind, percent.has_value(), percent, L"usb/" + key,
+                  Transport::receiver, receiver.protocol == Protocol::barracuda || receiver.protocol == Protocol::blackshark2020};
 }
 } // namespace
 
 ScanResult scan_usb_receivers() {
     ScanResult result;
-    GUID hid{};
-    HidD_GetHidGuid(&hid);
-    const HDEVINFO set = SetupDiGetClassDevsW(&hid, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    std::vector<std::wstring> logitech;
+    std::map<std::wstring, std::size_t> sinowealthDevices;
+    GUID hidClass{};
+    HidD_GetHidGuid(&hidClass);
+    const HDEVINFO set = SetupDiGetClassDevsW(&hidClass, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
     if (set == INVALID_HANDLE_VALUE) return {{}, true};
     struct DeviceSet { HDEVINFO handle; ~DeviceSet() { SetupDiDestroyDeviceInfoList(handle); } } devices{set};
     for (DWORD index = 0;; ++index) {
         SP_DEVICE_INTERFACE_DATA info{};
         info.cbSize = sizeof(info);
-        if (!SetupDiEnumDeviceInterfaces(set, nullptr, &hid, index, &info)) {
+        if (!SetupDiEnumDeviceInterfaces(set, nullptr, &hidClass, index, &info)) {
             result.failed = GetLastError() != ERROR_NO_MORE_ITEMS;
             break;
         }
@@ -372,8 +521,36 @@ ScanResult scan_usb_receivers() {
         std::vector<BYTE> buffer(required);
         auto* detail = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(buffer.data());
         detail->cbSize = sizeof(*detail);
-        if (!SetupDiGetDeviceInterfaceDetailW(set, &info, detail, required, nullptr, nullptr)) continue;
-        if (auto device = read_receiver(detail->DevicePath)) result.devices.push_back(std::move(*device));
+        SP_DEVINFO_DATA devnode{};
+        devnode.cbSize = sizeof(devnode);
+        if (!SetupDiGetDeviceInterfaceDetailW(set, &info, detail, required, nullptr, &devnode)) continue;
+        std::wstring key = detail->DevicePath;
+        std::ranges::transform(key, key.begin(), [](wchar_t ch) { return ch >= L'A' && ch <= L'Z' ? ch + 32 : ch; });
+        if (key.starts_with(logitechPathPrefix)) {
+            logitech.push_back(std::move(key));
+            continue;
+        }
+        const auto* receiver = receiver_for_path(key);
+        if (!receiver) continue;
+        if (receiver->protocol == Protocol::sinowealth) {
+            const auto container = container_key(set, devnode);
+            if (!container.empty()) key = std::wstring(receiver->interfacePath) + L"/" + container;
+            const auto existing = sinowealthDevices.find(key);
+            if (existing != sinowealthDevices.end()) {
+                if (!result.devices[existing->second].percent) {
+                    if (auto device = read_receiver(detail->DevicePath, key, *receiver); device && device->percent)
+                        result.devices[existing->second] = std::move(*device);
+                }
+                continue;
+            }
+            if (auto device = read_receiver(detail->DevicePath, key, *receiver)) {
+                sinowealthDevices.emplace(std::move(key), result.devices.size());
+                result.devices.push_back(std::move(*device));
+            }
+        } else if (auto device = read_receiver(detail->DevicePath, std::move(key), *receiver)) {
+            result.devices.push_back(std::move(*device));
+        }
     }
+    scan_logitech_receivers(logitech, result);
     return result;
 }

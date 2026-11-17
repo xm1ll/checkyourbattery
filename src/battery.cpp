@@ -39,19 +39,6 @@ struct Endpoint {
     guid container{};
 };
 
-std::wstring display_name(std::wstring name) {
-    std::erase_if(name, [](wchar_t ch) {
-        return ch < 0x20 || (ch >= 0x7f && ch <= 0x9f) || ch == 0x2028 || ch == 0x2029 ||
-               (ch >= 0x202a && ch <= 0x202e) || (ch >= 0x2066 && ch <= 0x2069);
-    });
-    if (name.size() > 88) {
-        name.resize(87);
-        if (IS_HIGH_SURROGATE(name.back())) name.pop_back();
-        name += L"…";
-    }
-    return name;
-}
-
 template <typename Operation>
 auto wait_for_result(const Operation& operation, std::chrono::seconds timeout) {
     if (const auto status = operation.wait_for(timeout); status == AsyncStatus::Started) {
@@ -177,6 +164,19 @@ void enumerate(bool lowEnergy, std::vector<Endpoint>& endpoints) {
     }
 }
 } // namespace
+
+std::wstring display_name(std::wstring name) {
+    std::erase_if(name, [](wchar_t ch) {
+        return ch < 0x20 || (ch >= 0x7f && ch <= 0x9f) || ch == 0x2028 || ch == 0x2029 ||
+               (ch >= 0x202a && ch <= 0x202e) || (ch >= 0x2066 && ch <= 0x2069);
+    });
+    if (name.size() > 88) {
+        name.resize(87);
+        if (IS_HIGH_SURROGATE(name.back())) name.pop_back();
+        name += L"…";
+    }
+    return name;
+}
 
 static ScanResult scan_bluetooth() {
     ScanResult result;
