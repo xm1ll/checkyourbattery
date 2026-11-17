@@ -19,6 +19,12 @@ If an icon appears under the hidden-icons arrow, drag it into the main tray or e
 
 The app reads battery levels provided by Windows for paired Bluetooth Classic and Bluetooth Low Energy (LE) devices. It can also query the standard GATT Battery Level characteristic on connected LE devices. The tray displays one battery level per device. [Microsoft Bluetooth GATT documentation](https://learn.microsoft.com/en-us/windows/apps/develop/devices-sensors/gatt-client)
 
+### Automatic USB detection
+
+A USB HID device can appear even if its model is missing from the tables below. The app first checks the battery percentage reported by Windows. If that value is unavailable, it can read the standard HID Battery Strength feature when the device declares it. Multiple HID interfaces of the same physical USB device are grouped together. These automatically detected devices are labeled **USB** in settings and diagnostics. [Windows battery property](https://learn.microsoft.com/en-us/windows/win32/properties/props-system-devices-batterylife) · [USB HID Usage Tables](https://usb.org/sites/default/files/hut1_21_0.pdf)
+
+Automatic detection uses read-only status queries on the regular scan interval. Receivers that only expose battery information through a proprietary protocol still need a compatible profile.
+
 ### 2.4 GHz USB receivers
 
 | Device | Receiver VID:PID | Battery reading |

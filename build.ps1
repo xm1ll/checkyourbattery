@@ -86,7 +86,8 @@ try {
         '-DUNICODE', '-D_UNICODE', '-DWIN32_LEAN_AND_MEAN', '-DNOMINMAX', '-D_WIN32_WINNT=0x0A00',
         '-I', $projection, '-municode', '-mwindows', '-static',
         '-Wl,--dynamicbase,--nxcompat,--high-entropy-va,--dependent-load-flag=0x800',
-        'tray.cpp', 'tray_icon.cpp', 'battery.cpp', 'usb_battery.cpp', 'logitech_battery.cpp', $resource, '-o', $executable,
+        'tray.cpp', 'tray_icon.cpp', 'battery.cpp', 'usb_battery.cpp', 'logitech_battery.cpp', 'standard_battery.cpp',
+        $resource, '-o', $executable,
         '-luser32', '-lgdi32', '-lshell32', '-lcomctl32', '-ladvapi32', '-lbcrypt', '-lcfgmgr32',
         '-lsetupapi', '-lhid', '-lruntimeobject', '-lole32', '-loleaut32'
     )
