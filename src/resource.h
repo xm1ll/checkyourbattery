@@ -1,0 +1,7 @@
+#define IDD_SETTINGS 101
+#define IDC_DEVICES 201
+#define IDC_PERCENT 202
+#define IDC_DEVICE_LABEL 203
+#define IDC_EMPTY 204
+#define IDC_DONE 205
+#define IDC_QUIT 206
