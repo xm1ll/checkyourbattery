@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$Bootstrap)
+param([switch]$Bootstrap, [switch]$Installer)
 
 $ErrorActionPreference = 'Stop'
 $workspace = $PSScriptRoot
@@ -12,6 +12,9 @@ $llvmBin = Join-Path $toolchain "$llvmName\bin"
 $compiler = Join-Path $llvmBin 'clang++.exe'
 $winrtTool = Join-Path $toolchain 'cppwinrt\bin\cppwinrt.exe'
 $projection = Join-Path $toolchain 'projection'
+$innoVersion = '6.7.4'
+$innoDirectory = Join-Path $toolchain "inno-$innoVersion"
+$innoCompiler = Join-Path $innoDirectory 'ISCC.exe'
 
 function Invoke-Checked {
     param([string]$Program, [string[]]$Arguments)
@@ -43,10 +46,29 @@ if ($Bootstrap) {
             (Join-Path $toolchain 'cppwinrt.zip') (Join-Path $toolchain 'cppwinrt') `
             '955E3051B35DB1C00177ED14AB6B7B995C3B32A53FDB6C184EA53B1DBA66E439'
     }
+    if ($Installer -and -not (Test-Path -LiteralPath $innoCompiler)) {
+        $innoPackage = Join-Path $toolchain "innosetup-$innoVersion.exe"
+        if (-not (Test-Path -LiteralPath $innoPackage)) {
+            Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_4/innosetup-6.7.4.exe' `
+                -OutFile $innoPackage
+        }
+        if ((Get-FileHash -LiteralPath $innoPackage -Algorithm SHA256).Hash -ne
+            'A549929319F9120716677C685535CA4671E4B937B5FDC87E2585F32D8EB30E8C') {
+            throw 'Inno Setup checksum mismatch.'
+        }
+        $unpack = Start-Process -FilePath $innoPackage -ArgumentList @(
+            '/PORTABLE=1', '/CURRENTUSER', '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOICONS',
+            ('/DIR="' + $innoDirectory + '"')
+        ) -Wait -PassThru -WindowStyle Hidden
+        if ($unpack.ExitCode -ne 0) { throw "Inno Setup unpack exited with code $($unpack.ExitCode)." }
+    }
 }
 
 if (-not (Test-Path -LiteralPath $compiler) -or -not (Test-Path -LiteralPath $winrtTool)) {
     throw 'Build tools are missing. Run .\build.ps1 -Bootstrap on Windows 11 x64.'
+}
+if ($Installer -and -not (Test-Path -LiteralPath $innoCompiler)) {
+    throw 'Installer compiler is missing. Run .\build.ps1 -Bootstrap -Installer.'
 }
 if (-not (Test-Path -LiteralPath (Join-Path $projection 'winrt\Windows.Devices.Bluetooth.h'))) {
     Invoke-Checked $winrtTool @('-input', (Join-Path $env:WINDIR 'System32\WinMetadata'), '-output', $projection)
@@ -72,3 +94,7 @@ try {
     Pop-Location
 }
 Write-Host "Built $executable"
+if ($Installer) {
+    Invoke-Checked $innoCompiler @('/Qp', (Join-Path $workspace 'setup.iss'))
+    Write-Host "Built $(Join-Path $buildDirectory 'CheckYourBattery-Setup.exe')"
+}
