@@ -5,7 +5,7 @@
 #include <vector>
 
 enum class DeviceKind { other, mouse, audio, keyboard, controller };
-enum class Transport { bluetooth, receiver };
+enum class Transport { bluetooth, receiver, usb };
 
 struct Device {
     std::wstring name;
@@ -28,3 +28,5 @@ ScanResult scan_devices();
 ScanResult scan_usb_receivers();
 ScanResult demo_devices(bool english);
 std::wstring display_name(std::wstring name);
+DeviceKind classify_device_name(std::wstring text);
+std::optional<unsigned> windows_device_battery(unsigned long devnode);

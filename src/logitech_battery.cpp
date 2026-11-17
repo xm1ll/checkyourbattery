@@ -21,7 +21,7 @@ constexpr LogitechHeadset logitechHeadsets[]{
 };
 
 std::optional<USHORT> logitech_pid(std::wstring_view path) {
-    constexpr auto prefix = logitechPathPrefix;
+    constexpr std::wstring_view prefix = L"\\\\?\\hid#vid_046d&pid_";
     if (!path.starts_with(prefix) || path.size() <= prefix.size() + 4) return {};
     const auto suffix = path.substr(prefix.size());
     if (suffix[4] != L'&' && suffix[4] != L'#') return {};
@@ -315,6 +315,12 @@ void read_logitech(const std::map<std::wstring, LogitechReceiver>& receivers, Sc
 }
 
 } // namespace
+
+bool has_logitech_profile(std::wstring_view path) {
+    const auto pid = logitech_pid(path);
+    return pid && (std::ranges::find(logitechReceivers, *pid) != std::end(logitechReceivers) ||
+                   std::ranges::find(logitechHeadsets, *pid, &LogitechHeadset::pid) != std::end(logitechHeadsets));
+}
 
 void scan_logitech_receivers(std::span<const std::wstring> paths, ScanResult& result) {
     std::map<std::wstring, LogitechReceiver> receivers;

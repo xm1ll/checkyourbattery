@@ -1,5 +1,8 @@
 #include "hid_io.hpp"
+#include "standard_battery.hpp"
 
+#include <winioctl.h>
+#include <hidclass.h>
 #include <objbase.h>
 #include <setupapi.h>
 
@@ -29,6 +32,17 @@ bool hid_caps(HANDLE handle, USHORT vendor, USHORT product, HIDP_CAPS& caps) {
     return status == HIDP_STATUS_SUCCESS;
 }
 
+static DWORD finish_transfer(HANDLE handle, OVERLAPPED& operation, BOOL started, DWORD size, DWORD waitMs) {
+    if (started) return size;
+    if (GetLastError() != ERROR_IO_PENDING) return 0;
+    if (WaitForSingleObject(operation.hEvent, waitMs) != WAIT_OBJECT_0) {
+        CancelIoEx(handle, &operation);
+        GetOverlappedResult(handle, &operation, &size, TRUE);
+        return 0;
+    }
+    return GetOverlappedResult(handle, &operation, &size, FALSE) ? size : 0;
+}
+
 DWORD transfer(HANDLE handle, std::span<BYTE> report, bool write, DWORD waitMs) {
     const Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     if (!event) return 0;
@@ -37,14 +51,19 @@ DWORD transfer(HANDLE handle, std::span<BYTE> report, bool write, DWORD waitMs) 
     DWORD size = 0;
     const auto started = write ? WriteFile(handle, report.data(), static_cast<DWORD>(report.size()), &size, &operation)
                                : ReadFile(handle, report.data(), static_cast<DWORD>(report.size()), &size, &operation);
-    if (started) return size;
-    if (GetLastError() != ERROR_IO_PENDING) return 0;
-    if (WaitForSingleObject(event.get(), waitMs) != WAIT_OBJECT_0) {
-        CancelIoEx(handle, &operation);
-        GetOverlappedResult(handle, &operation, &size, TRUE);
-        return 0;
-    }
-    return GetOverlappedResult(handle, &operation, &size, FALSE) ? size : 0;
+    return finish_transfer(handle, operation, started, size, waitMs);
+}
+
+DWORD get_feature(HANDLE handle, std::span<BYTE> report, DWORD waitMs) {
+    const Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (!event) return 0;
+    OVERLAPPED operation{};
+    operation.hEvent = event.get();
+    DWORD size = 0;
+    const auto length = static_cast<DWORD>(report.size());
+    const auto started = DeviceIoControl(handle, IOCTL_HID_GET_FEATURE, report.data(), length,
+                                        report.data(), length, &size, &operation);
+    return finish_transfer(handle, operation, started, size, waitMs);
 }
 } // namespace hid
 
@@ -503,6 +522,11 @@ ScanResult scan_usb_receivers() {
     ScanResult result;
     std::vector<std::wstring> logitech;
     std::map<std::wstring, std::size_t> sinowealthDevices;
+    struct UsbDevice {
+        std::vector<UsbHidInterface> interfaces;
+        std::optional<std::size_t> profile;
+    };
+    std::map<DEVINST, UsbDevice> usbDevices;
     GUID hidClass{};
     HidD_GetHidGuid(&hidClass);
     const HDEVINFO set = SetupDiGetClassDevsW(&hidClass, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
@@ -526,31 +550,55 @@ ScanResult scan_usb_receivers() {
         if (!SetupDiGetDeviceInterfaceDetailW(set, &info, detail, required, nullptr, &devnode)) continue;
         std::wstring key = detail->DevicePath;
         std::ranges::transform(key, key.begin(), [](wchar_t ch) { return ch >= L'A' && ch <= L'Z' ? ch + 32 : ch; });
-        if (key.starts_with(logitechPathPrefix)) {
+        if (has_logitech_profile(key)) {
             logitech.push_back(std::move(key));
             continue;
         }
+        UsbDevice* usb = nullptr;
+        if (key.starts_with(L"\\\\?\\hid#")) {
+            if (const auto physical = physical_usb_device(devnode.DevInst)) {
+                usb = &usbDevices[*physical];
+                usb->interfaces.push_back({detail->DevicePath, devnode.DevInst});
+            }
+        }
         const auto* receiver = receiver_for_path(key);
         if (!receiver) continue;
+        std::optional<std::size_t> profile;
         if (receiver->protocol == Protocol::sinowealth) {
             const auto container = container_key(set, devnode);
             if (!container.empty()) key = std::wstring(receiver->interfacePath) + L"/" + container;
             const auto existing = sinowealthDevices.find(key);
             if (existing != sinowealthDevices.end()) {
-                if (!result.devices[existing->second].percent) {
+                profile = existing->second;
+                if (!result.devices[*profile].percent) {
                     if (auto device = read_receiver(detail->DevicePath, key, *receiver); device && device->percent)
-                        result.devices[existing->second] = std::move(*device);
+                        result.devices[*profile] = std::move(*device);
                 }
-                continue;
-            }
-            if (auto device = read_receiver(detail->DevicePath, key, *receiver)) {
-                sinowealthDevices.emplace(std::move(key), result.devices.size());
+            } else if (auto device = read_receiver(detail->DevicePath, key, *receiver)) {
+                profile = result.devices.size();
+                sinowealthDevices.emplace(std::move(key), *profile);
                 result.devices.push_back(std::move(*device));
             }
         } else if (auto device = read_receiver(detail->DevicePath, std::move(key), *receiver)) {
+            profile = result.devices.size();
             result.devices.push_back(std::move(*device));
         }
+        if (usb && profile && (!usb->profile || result.devices[*profile].percent)) usb->profile = profile;
     }
     scan_logitech_receivers(logitech, result);
+    const auto automaticDeadline = GetTickCount64() + 350;
+    for (const auto& [root, usb] : usbDevices) {
+        if (usb.profile && result.devices[*usb.profile].percent) continue;
+        auto reading = standard_usb_battery(root, usb.interfaces, automaticDeadline);
+        if (!reading) continue;
+        if (usb.profile) {
+            auto& device = result.devices[*usb.profile];
+            device.percent = reading->percent;
+            device.connected = true;
+            device.estimated = false;
+        } else {
+            result.devices.push_back(std::move(*reading));
+        }
+    }
     return result;
 }
